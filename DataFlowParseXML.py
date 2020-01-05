@@ -7,6 +7,8 @@ import apache_beam as beam
 import xml.etree.ElementTree as ET
 from apache_beam import pvalue
 
+processed_dir = ''
+unprocessed_dir = ''
 
 def parse_and_move(path):
     import xml.etree.ElementTree as ET
@@ -31,34 +33,42 @@ def parse_and_move(path):
             }
             item_list.append(i)
 
-        dest = re.sub(args.unprocessed_dir, args.processed_dir, path) 
+        dest = re.sub(unprocessed_dir, processed_dir, path) 
         beam.io.filesystems.FileSystems.rename([path], [dest])
 
         yield pvalue.TaggedOutput('ok', item_list)
         yield item_list
 
     except Exception as e:
-        #return [{"pubdate":"error","link":path,"title":str(e)}]
-        yield pvalue.TaggedOutput('fail', str(e))
-        yield (str(e), str(path))    
+        error_pack = [{"filepath":path,"errormsg":str(e)}]
+        yield pvalue.TaggedOutput('fail', error_pack)
+        yield error_pack
 
 
 if __name__ == '__main__':
 
    parser = argparse.ArgumentParser()
    parser.add_argument('-ds', '--dataset', dest='dataset', action='store', help='target dataset name')
-   parser.add_argument('-t', '--table', dest='table', action='store', help='table name')
+   parser.add_argument('-t', '--table', dest='table', action='store', help='target table name')
+   parser.add_argument('-et', '--error_table', dest='err_table', action='store', help='error table name')
    parser.add_argument('-p', '--project', dest='project', action='store', help='project name')
    parser.add_argument('-b', '--bucketpath', dest='bucketpath', action='store', help='temporary bucket path for processing')
    parser.add_argument('-pt', '--patterns', dest='patterns', action='store', help='pattern(s) of source XML file')
    parser.add_argument('-pd', '--processed_dir', dest='processed_dir', action='store', help='path to processed files')
    parser.add_argument('-ud', '--unprocessed_dir', dest='unprocessed_dir', action='store', help='path to unprocessed files')
    parser.add_argument('-r', '--runner', dest='runner', action='store', help='run method')
+   parser.add_argument('-rg', '--region', dest='region', action='store', help='region where dataflow job runs')
 
    args = parser.parse_args()
 
+   processed_dir = args.processed_dir
+   unprocessed_dir = args.unprocessed_dir
+
    OUTPUT_TABLE = args.project + ':' + args.dataset + '.' + args.table
    TABLE_SCHEMA = ('pubdate:STRING, link:STRING, title:STRING')
+   
+   ERR_OUTPUT_TABLE = args.project + ':' + args.dataset + '.' + args.err_table
+   ERR_TABLE_SCHEMA = ('filepath:STRING, errormsg:STRING')
 
 
    argv = [
@@ -67,7 +77,8 @@ if __name__ == '__main__':
       #'--save_main_session',
       '--staging_location=gs://{0}/staging/'.format(args.bucketpath),
       '--temp_location=gs://{0}/staging/'.format(args.bucketpath),
-      '--runner=DataflowRunner'
+      '--runner={0}'.format(args.runner),
+      '--region={0}'.format(args.region)
    ]
 
    p = beam.Pipeline(argv=argv)
@@ -84,11 +95,18 @@ if __name__ == '__main__':
 
    (collection['ok'] | 'Flatten' >> beam.FlatMap(lambda x: x)  
                      | 'WriteToBigQuery' >> beam.io.gcp.bigquery.WriteToBigQuery(
-                           custom_gcs_temp_location = 'gs://dsm-2018/dataflow/bigquery-temp',
                            table = OUTPUT_TABLE,
                            schema = TABLE_SCHEMA,
                            create_disposition = beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
                            write_disposition = beam.io.BigQueryDisposition.WRITE_APPEND)
+   )
+   
+   (collection['fail'] | 'FlattenErrors' >> beam.FlatMap(lambda x: x)  
+                       | 'WriteErrorsToBigQuery' >> beam.io.gcp.bigquery.WriteToBigQuery(
+                             table = ERR_OUTPUT_TABLE,
+                             schema = ERR_TABLE_SCHEMA,
+                             create_disposition = beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
+                             write_disposition = beam.io.BigQueryDisposition.WRITE_APPEND)
    )
 
    p.run()
