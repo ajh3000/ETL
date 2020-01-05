@@ -7,16 +7,18 @@ import apache_beam as beam
 import xml.etree.ElementTree as ET
 from apache_beam import pvalue
 
-processed_dir = ''
-unprocessed_dir = ''
 
-def parse_and_move(path):
+def parse_and_move(path_and_meta):
     import xml.etree.ElementTree as ET
     import re
     import sys
     import apache_beam as beam
     from apache_beam import pvalue
     try:
+        path,_,_ = path_and_meta
+        _,unprocessed_dir,_ = path_and_meta
+        _,_,processed_dir = path_and_meta
+
         open_file = beam.io.filesystems.FileSystems.open(path)
         content = open_file.read()
         root = ET.fromstring(content)
@@ -56,13 +58,15 @@ if __name__ == '__main__':
    parser.add_argument('-pt', '--patterns', dest='patterns', action='store', help='pattern(s) of source XML file')
    parser.add_argument('-pd', '--processed_dir', dest='processed_dir', action='store', help='path to processed files')
    parser.add_argument('-ud', '--unprocessed_dir', dest='unprocessed_dir', action='store', help='path to unprocessed files')
+   parser.add_argument('-sd', '--staging_dir', dest='staging_dir', action='store', help='path to staging directory')
    parser.add_argument('-r', '--runner', dest='runner', action='store', help='run method')
    parser.add_argument('-rg', '--region', dest='region', action='store', help='region where dataflow job runs')
 
    args = parser.parse_args()
 
-   processed_dir = args.processed_dir
-   unprocessed_dir = args.unprocessed_dir
+   pattern_path = args.bucketpath + '/' + args.unprocessed_dir + '/' + args.patterns
+   staging_path = args.bucketpath + '/' + args.staging_dir 
+   temp_path = args.bucketpath + '/' + args.staging_dir 
 
    OUTPUT_TABLE = args.project + ':' + args.dataset + '.' + args.table
    TABLE_SCHEMA = ('pubdate:STRING, link:STRING, title:STRING')
@@ -75,18 +79,18 @@ if __name__ == '__main__':
       '--project={0}'.format(args.project),
       '--job_name=parse-and-write',
       #'--save_main_session',
-      '--staging_location=gs://{0}/staging/'.format(args.bucketpath),
-      '--temp_location=gs://{0}/staging/'.format(args.bucketpath),
+      '--staging_location={0}/'.format(staging_path),
+      '--temp_location={0}/'.format(staging_path),
       '--runner={0}'.format(args.runner),
       '--region={0}'.format(args.region)
    ]
 
    p = beam.Pipeline(argv=argv)
 
-   fmd_list =  beam.io.filesystems.FileSystems.match([args.patterns])
+   fmd_list =  beam.io.filesystems.FileSystems.match([pattern_path])
    path_list = []
    for i in fmd_list[0].metadata_list:
-        path_list.append(i.path)
+        path_list.append((i.path, args.unprocessed_dir, args.processed_dir))
    print("Number of files to be processed: ", len(path_list))
 
    collection = (p | 'CreatePathList' >> beam.Create(path_list)
